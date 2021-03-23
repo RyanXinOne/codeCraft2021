@@ -9,7 +9,7 @@ sys.stdin = open("training-data/training-1.txt", "r")
 class DataIO:
     @staticmethod
     def read_data():
-        ''' 读取数据，返回: pms, vms, requests '''
+        ''' 读取数据，返回: pms, vms, requests, days '''
 
         # 读取可采购的服务器类型
         pmsNum = int(sys.stdin.readline())
@@ -42,7 +42,7 @@ class DataIO:
                     dailyReq["del"].append(s[1])
             requests.append(dailyReq)
 
-        return pms, vms, requests
+        return pms, vms, requests, days
 
     @staticmethod
     def write_output(expansion, migration, decision):
@@ -64,12 +64,6 @@ class Auxiliary:
         return size[0] ** 2 + size[1] ** 2
 
     @staticmethod
-    def calc_comp_cost(cost, days):
-        '''计算综合开销'''
-        a = 1
-        return cost[0] + a * days * cost[1]
-
-    @staticmethod
     def calc_perc_util(pmId):
         '''计算某一台服务器的资源利用率'''
         pm = OWNED_PMS[pmId]
@@ -83,11 +77,48 @@ class Auxiliary:
         return assigned_comp_res / total_comp_res
 
     @staticmethod
-    def sort_pms(pmIds, reverse=False):
-        '''将输入服务器id按照既定策略递增/减排序，输出排序后的服务器id列表'''
+    def calc_comp_cost(pmType, days):
+        '''计算综合开销'''
+        a = 1
+        cost = ALL_PMS[pmType]["cost"]
+        return cost[0] + a * days * cost[1]
+
+    @staticmethod
+    def calc_total_size(vmTypes):
+        '''计算输入虚拟机列表的总所需资源（均分入两个节点中）'''
+        containerA = np.zeros(2, dtype=np.uint32)
+        containerB = np.zeros(2, dtype=np.uint32)
+        # 遍历虚拟机
+        for vmType in vmTypes:
+            vmSize = ALL_VMS[vmType]["size"]
+            # 判断单双节点
+            if ALL_VMS[vmType]["isDual"]:
+                containerA += vmSize // 2
+                containerB += vmSize // 2
+            else:
+                # 将虚拟机放入负载较小的节点
+                if Auxiliary.calc_comp_res(containerA) <= Auxiliary.calc_comp_res(containerB):
+                    containerA += vmSize
+                else:
+                    containerB += vmSize
+        return containerA, containerB
+
+    @staticmethod
+    def sort_pms_by_percUtil(pmIds, reverse=False):
+        '''将输入服务器id按照资源利用率递增/减排序，输出排序后的服务器id列表'''
         # 对每台服务器计算资源利用率
         pms = [(pmId, Auxiliary.calc_perc_util(pmId)) for pmId in pmIds]
         # 按资源利用率排序
+        pms.sort(key=lambda x: x[1], reverse=reverse)
+        # 输出服务器ids
+        return [pm[0] for pm in pms]
+
+    @staticmethod
+    def sort_pms_by_compCost(pmTypes, days, reverse=False):
+        '''将输入服务器类型按照资源利用率递增/减排序，输出排序后的服务器类型列表'''
+        # 对每台服务器计算综合开销
+        pms = [(pmType, Auxiliary.calc_comp_cost(pmType, days)) for pmType in pmTypes]
+        # 按综合开销排序
         pms.sort(key=lambda x: x[1], reverse=reverse)
         # 输出服务器ids
         return [pm[0] for pm in pms]
@@ -110,8 +141,11 @@ class Auxiliary:
                 return False
         # 若vm为单节点
         else:
-            # 选取资源综合值较低（剩余空间较多）的节点
-            node = "A" if Auxiliary.calc_comp_res(pm["A"]) >= Auxiliary.calc_comp_res(pm["B"]) else 'B'
+            # 选取资源综合值较低的节点
+            nodeSize = ALL_PMS[pm["pmType"]]["size"] // 2
+            sizeA = nodeSize - pm["A"]
+            sizeB = nodeSize - pm["B"]
+            node = "A" if Auxiliary.calc_comp_res(sizeA) <= Auxiliary.calc_comp_res(sizeB) else 'B'
             if (pm[node] >= vmSize).all():
                 # 允许放入
                 STOCK_VMS[vmId] = {"vmType": vmType, "pmId": pmId, "node": node}
@@ -156,7 +190,7 @@ def handle_migration():
     migration_num = 0
     # 将服务器按既定策略递增排序
     pmIds = [pmId for pmId in OWNED_PMS]
-    pmIds = Auxiliary.sort_pms(pmIds)
+    pmIds = Auxiliary.sort_pms_by_percUtil(pmIds)
     n = len(pmIds)
     # 遍历服务器0到n-1
     for i in range(n):
@@ -166,30 +200,53 @@ def handle_migration():
             vm = STOCK_VMS[vmId]
             # 遍历服务器n-1到i+1
             for j in range(n - 1, i, -1):
-                backupVm = vm.copy()
                 # 尝试迁移到新服务器
                 isAssigned = Auxiliary.try_assign_vm(vmId, vm["vmType"], pmIds[j])
                 # 若迁移成功
                 if isAssigned:
                     # 从旧服务器中删除
-                    Auxiliary.delete_vm(vmId, backupVm["vmType"], backupVm["pmId"], backupVm["node"])
+                    Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
                     migration_num += 1
                     # 检查是否达到约束限制
                     if migration_num == constraint_num:
                         return
                     # 重新排序服务器j到n-1
-                    pmIds = pmIds[:j] + Auxiliary.sort_pms(pmIds[j:])
+                    pmIds = pmIds[:j] + Auxiliary.sort_pms_by_percUtil(pmIds[j:])
                     break
 
 def handle_place(reqs):
     '''执行放置策略'''
+    purchase_req = []
+    pmIds = [pmId for pmId in OWNED_PMS]
+    # 将服务器按既定策略递减排序
+    pmIds = Auxiliary.sort_pms_by_percUtil(pmIds, reverse=True)
+    # 遍历输入的增添请求
+    for vmId, vmType in reqs:
+        # 遍历服务器
+        for i, pmId in enumerate(pmIds):
+            # 尝试放置请求
+            isAssigned = Auxiliary.try_assign_vm(vmId, vmType, pmId)
+            # 若放置成功
+            if isAssigned:
+                # 重新排序服务器0到i
+                pmIds = Auxiliary.sort_pms_by_percUtil(pmIds[: i + 1], reverse=True) + pmIds[i + 1 :]
+                break
+        else:
+            # 记录放不下的请求
+            purchase_req.append((vmId, vmType))
+    return purchase_req
+
+def handle_purchase(reqs, leftDays):
+    '''执行购买策略'''
+    # 计算总所需资源
+    vmTypes = [req[1] for req in reqs]
+    totalA, totalB = Auxiliary.calc_total_size(vmTypes)
+    # 将可选购服务器按综合开销递增排序
+    pmTypes = [pmType for pmType in ALL_PMS]
+    pmTypes = Auxiliary.sort_pms_by_compCost(pmTypes, leftDays)
+    # 遍历可选购服务器
     pass
 
-def handle_purchase(reqs):
-    '''执行购买策略'''
-    pass
-    bought_pms = {}
-    OWNED_PMS.update(bought_pms)
 
 def final_cleanup(reqs):
     '''执行最后清理'''
@@ -198,16 +255,16 @@ def final_cleanup(reqs):
 
 if __name__ == "__main__":
     # to read standard input # process # to write standard output # sys.stdout.flush()
-    ALL_PMS, ALL_VMS, REQS = DataIO.read_data()
+    ALL_PMS, ALL_VMS, REQS, all_days = DataIO.read_data()
 
     OWNED_PMS = {}
     STOCK_VMS = {}
 
-    for req in REQS:
+    for d, req in enumerate(REQS):
         cleanup_req = handle_delete(req["del"])
         handle_migration()
         purchase_req = handle_place(req["add"])
-        handle_purchase(purchase_req)
+        handle_purchase(purchase_req, all_days - d)
         final_cleanup(cleanup_req)
 
     print(OWNED_PMS)
