@@ -1,5 +1,4 @@
 import sys
-import numpy as np
 
 DEBUG = True
 
@@ -10,9 +9,25 @@ if DEBUG:
     sys.stdout = open("output.txt", "w")
 
 # settings
-MAX_ITERATIONS = 16
-MAX_MIGRATION = 5
-PLACEMENT_THRESHOLD = 10
+MAX_MIGRATION = 30
+RELAX_SIZE = 10
+
+class VectorCalc:
+    @staticmethod
+    def add(a, b):
+        return [a[0] + b[0], a[1] + b[1]]
+    
+    @staticmethod
+    def minus(a, b):
+        return [a[0] - b[0], a[1] - b[1]]
+
+    @staticmethod
+    def div2(a):
+        return [a[0] // 2, a[1] // 2]
+    
+    @staticmethod
+    def ge(a, b):
+        return a[0] >= b[0] and a[1] >= b[1]
 
 
 class DataIO:
@@ -26,14 +41,14 @@ class DataIO:
         for i in range(pmsNum):
             s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
             pms[s[0]] = {"cpu": int(s[1]), "memory": int(s[2]), "hardCost": int(s[3]), "dailyCost": int(s[4])}
-            pms[s[0]] = {"size": np.array([int(s[1]), int(s[2])], dtype=np.uint32), "cost": np.array([int(s[3]), int(s[4])], dtype=np.uint32)}
+            pms[s[0]] = {"size": [int(s[1]), int(s[2])], "cost": [int(s[3]), int(s[4])]}
 
         # 读取供售卖的虚拟机类型
         vmsNum = int(sys.stdin.readline())
         vms = {}
         for i in range(vmsNum):
             s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
-            vms[s[0]] = {"size": np.array([int(s[1]), int(s[2])], dtype=np.uint32), "isDual": bool(int(s[3]))}
+            vms[s[0]] = {"size": [int(s[1]), int(s[2])], "isDual": bool(int(s[3]))}
 
         # 读取以天为单位的用户请求序列
         days = int(sys.stdin.readline())
@@ -119,7 +134,7 @@ class Auxiliary:
         total_size = ALL_PMS[pm["pmType"]]["size"]
         total_comp_res = Auxiliary.calc_comp_res(total_size)
         # 计算已分配资源综合值
-        used_size = total_size - pm["A"] - pm["B"]
+        used_size = VectorCalc.minus(total_size, VectorCalc.add(pm["A"], pm["B"]))
         assigned_comp_res = Auxiliary.calc_comp_res(used_size)
         # 输出利用率
         return assigned_comp_res / total_comp_res
@@ -134,8 +149,8 @@ class Auxiliary:
     @staticmethod
     def calc_total_size(reqs):
         '''计算输入虚拟机列表的总所需资源（均分入两个节点中）'''
-        containerA = np.zeros(2, dtype=np.uint32)
-        containerB = np.zeros(2, dtype=np.uint32)
+        containerA = [0, 0]
+        containerB = [0, 0]
         vmNodeInfo = {}
         # 遍历虚拟机
         for req in reqs:
@@ -144,16 +159,16 @@ class Auxiliary:
             vmSize = ALL_VMS[vmType]["size"]
             # 判断单双节点
             if ALL_VMS[vmType]["isDual"]:
-                containerA += vmSize // 2
-                containerB += vmSize // 2
+                containerA = VectorCalc.add(containerA, VectorCalc.div2(vmSize))
+                containerB = VectorCalc.add(containerB, VectorCalc.div2(vmSize))
                 vmNodeInfo[vmId] = None
             else:
                 # 将虚拟机放入负载较小的节点
                 if Auxiliary.calc_comp_res(containerA) <= Auxiliary.calc_comp_res(containerB):
-                    containerA += vmSize
+                    containerA = VectorCalc.add(containerA, vmSize)
                     vmNodeInfo[vmId] = "A"
                 else:
-                    containerB += vmSize
+                    containerB = VectorCalc.add(containerB, vmSize)
                     vmNodeInfo[vmId] = "B"
         return containerA, containerB, vmNodeInfo
 
@@ -178,6 +193,15 @@ class Auxiliary:
         return [pm[0] for pm in pms]
 
     @staticmethod
+    def sort_vms_by_compRes(vmIds, reverse=False):
+        '''按综合资源值排序虚拟机id'''
+        vms = [(vmId, Auxiliary.calc_comp_res(ALL_VMS[STOCK_VMS[vmId]["vmType"]]["size"])) for vmId in vmIds]
+        # 按综合资源排序
+        vms.sort(key=lambda x: x[1], reverse=reverse)
+        # 输出虚拟机ids
+        return [vm[0] for vm in vms]
+
+    @staticmethod
     def sort_reqs_by_compRes(reqs, reverse=False):
         '''按综合资源值排序虚拟机请求'''
         rs = [(req, Auxiliary.calc_comp_res(ALL_VMS[req[1]]["size"])) for req in reqs]
@@ -193,27 +217,27 @@ class Auxiliary:
         vmSize = ALL_VMS[vmType]["size"]
         # 若vm为双节点
         if ALL_VMS[vmType]["isDual"]:
-            if (pm["A"] >= vmSize // 2).all() and (pm["B"] >= vmSize // 2).all():
+            if VectorCalc.ge(pm["A"], VectorCalc.div2(vmSize)) and VectorCalc.ge(pm["B"], VectorCalc.div2(vmSize)):
                 # 允许放入
                 STOCK_VMS[vmId] = {"vmType": vmType, "pmId": pmId, "node": None}
                 pm["vms"].add(vmId)
-                pm["A"] -= vmSize // 2
-                pm["B"] -= vmSize // 2
+                pm["A"] = VectorCalc.minus(pm["A"], VectorCalc.div2(vmSize))
+                pm["B"] = VectorCalc.minus(pm["B"], VectorCalc.div2(vmSize))
                 return True
             else:
                 return False
         # 若vm为单节点
         else:
             # 选取资源综合值较低的节点
-            nodeSize = ALL_PMS[pm["pmType"]]["size"] // 2
-            sizeA = nodeSize - pm["A"]
-            sizeB = nodeSize - pm["B"]
+            nodeSize = VectorCalc.div2(ALL_PMS[pm["pmType"]]["size"])
+            sizeA = VectorCalc.minus(nodeSize, pm["A"])
+            sizeB = VectorCalc.minus(nodeSize, pm["B"])
             node = "A" if Auxiliary.calc_comp_res(sizeA) <= Auxiliary.calc_comp_res(sizeB) else 'B'
-            if (pm[node] >= vmSize).all():
+            if VectorCalc.ge(pm[node], vmSize):
                 # 允许放入
                 STOCK_VMS[vmId] = {"vmType": vmType, "pmId": pmId, "node": node}
                 pm["vms"].add(vmId)
-                pm[node] -= vmSize
+                pm[node] = VectorCalc.minus(pm[node], vmSize)
                 return True
             else:
                 return False
@@ -227,10 +251,10 @@ class Auxiliary:
         # 更新服务器剩余资源
         vmSize = ALL_VMS[vmType]["size"]
         if node is None:
-            pm["A"] += vmSize // 2
-            pm["B"] += vmSize // 2
+            pm["A"] = VectorCalc.add(pm["A"], VectorCalc.div2(vmSize))
+            pm["B"] = VectorCalc.add(pm["B"], VectorCalc.div2(vmSize))
         else:
-            pm[node] += vmSize
+            pm[node] = VectorCalc.add(pm[node], vmSize)
 
 
 def handle_delete(reqs):
@@ -259,11 +283,14 @@ def handle_migration():
     # 遍历服务器0到n-1
     for i in range(length):
         pmId = pmIds[i]
+        # 升序排序服务器i中的虚拟机资源
+        vmIds = Auxiliary.sort_vms_by_compRes(OWNED_PMS[pmId]["vms"])
+        n = length - 1
         # 遍历服务器i中的虚拟机资源
-        for vmId in OWNED_PMS[pmId]["vms"].copy():
+        for vmId in vmIds:
             vm = STOCK_VMS[vmId]
             # 遍历服务器n-1到i+1
-            for j in range(length - 1, i, -1):
+            for j in range(n, i, -1):
                 # 尝试迁移到新服务器
                 isAssigned = Auxiliary.try_assign_vm(vmId, vm["vmType"], pmIds[j])
                 # 若迁移成功
@@ -277,6 +304,7 @@ def handle_migration():
                         return migrated
                     # 重新排序服务器j到n-1
                     pmIds = pmIds[:j] + Auxiliary.sort_pms_by_percUtil(pmIds[j:])
+                    n = min(j + RELAX_SIZE, length - 1)
                     break
             else:
                 # 优化：若无法迁移，则不能使该服务器达到空闲，不再尝试继续迁移
@@ -295,12 +323,7 @@ def handle_place(reqs):
     n = 0
     length = len(pmIds)
     # 遍历输入的增添请求
-    for i, req in enumerate(reqs):
-        if i >= MAX_ITERATIONS:
-            purchase_req += reqs[i:]
-            break
-        vmId = req[0]
-        vmType = req[1]
+    for vmId, vmType in reqs:
         # 遍历服务器
         for j in range(n, length):
             pmId = pmIds[j]
@@ -310,12 +333,12 @@ def handle_place(reqs):
             if isAssigned:
                 # 重新排序服务器0到i
                 pmIds = Auxiliary.sort_pms_by_percUtil(pmIds[: j + 1], reverse=True) + pmIds[j + 1 :]
-                n = max(j - PLACEMENT_THRESHOLD, 0)
+                n = max(j - RELAX_SIZE, 0)
                 break
         else:
             # 记录放不下的请求
-            purchase_req += reqs[i:]
-            break
+            purchase_req.append((vmId, vmType))
+            n = max(length - RELAX_SIZE, 0)
     return purchase_req
 
 def pre_purchase(reqs, leftDays, pmTypes):
@@ -327,10 +350,10 @@ def pre_purchase(reqs, leftDays, pmTypes):
     # 遍历可选购服务器
     for pmType in pmTypes:
         #判断该服务器能否装下所有请求
-        nodeSize = ALL_PMS[pmType]["size"] // 2
-        if (nodeSize >= totalA).all() and (nodeSize >= totalB).all():
+        nodeSize = VectorCalc.div2(ALL_PMS[pmType]["size"])
+        if VectorCalc.ge(nodeSize, totalA) and VectorCalc.ge(nodeSize, totalB):
             # 购买该服务器并分配所有请求
-            purchase_pms.append({"pmType": pmType, "vms": set(vmIds), "A": nodeSize - totalA, "B": nodeSize - totalB})
+            purchase_pms.append({"pmType": pmType, "vms": set(vmIds), "A": VectorCalc.minus(nodeSize, totalA), "B": VectorCalc.minus(nodeSize, totalB)})
             break
     else:
         # 二分请求，递归购买
@@ -371,7 +394,7 @@ def handle_purchase(reqs, leftDays):
         pmId += 1
     
     return [(t, type_num[t]) for t in types]
-    
+
 
 def final_cleanup(reqs):
     '''执行最后清理'''
