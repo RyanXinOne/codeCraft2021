@@ -97,12 +97,12 @@ REQS = [
 , ...]
 
 # 已拥有服务器
-OWNED_PMS = {服务器id:
+OWNED_PMS = [
     {"pmType": 服务器型号,
      "vms": {虚拟机id, ...},
      "A": np.array([剩余cpu, 剩余momory]),
      "B": np.array([剩余cpu, 剩余momory])}
-, ...}
+, ...]
 
 # 已分配的存量虚拟机
 STOCK_VMS = {虚拟机id:
