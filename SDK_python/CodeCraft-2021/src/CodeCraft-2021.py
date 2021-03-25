@@ -4,14 +4,16 @@ DEBUG = False
 
 if DEBUG:
     import time
-    dataset_no = 2
+    dataset_no = 1
     # redirect stdin/stdout
     sys.stdin = open("training-data/training-"+str(dataset_no)+".txt", "r")
     sys.stdout = open("output"+str(dataset_no)+".txt", "w")
 
 # settings
 RELAX_SIZE = 8
-MAX_MIGRATION = 80
+MAX_MIGRATION = 50
+ALPHA = 0.8
+
 
 class VectorCalc:
     @staticmethod
@@ -40,7 +42,6 @@ class DataIO:
         pms = {}
         for i in range(pmsNum):
             s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
-            pms[s[0]] = {"cpu": int(s[1]), "memory": int(s[2]), "hardCost": int(s[3]), "dailyCost": int(s[4])}
             pms[s[0]] = {"size": [int(s[1]), int(s[2])], "cost": [int(s[3]), int(s[4])]}
 
         # 读取供售卖的虚拟机类型
@@ -61,13 +62,13 @@ class DataIO:
         reqsNum = int(sys.stdin.readline())
         dailyReq = {}
         dailyReq["add"] = []
-        dailyReq["del"] = []
+        dailyReq["del"] = set()
         for j in range(reqsNum):
             s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
             if s[0] == "add":
                 dailyReq["add"].append((s[2], s[1]))
             else:
-                dailyReq["del"].append(s[1])
+                dailyReq["del"].add(s[1])
         return dailyReq
 
     @staticmethod
@@ -143,35 +144,8 @@ class Auxiliary:
     @staticmethod
     def calc_comp_cost(pmType, days):
         '''计算综合开销'''
-        a = 1
         cost = ALL_PMS[pmType]["cost"]
-        return cost[0] + a * days * cost[1]
-
-    @staticmethod
-    def calc_total_size(reqs):
-        '''计算输入虚拟机列表的总所需资源（均分入两个节点中）'''
-        containerA = [0, 0]
-        containerB = [0, 0]
-        vmNodeInfo = {}
-        # 遍历虚拟机
-        for req in reqs:
-            vmId = req[0]
-            vmType = req[1]
-            vmSize = ALL_VMS[vmType]["size"]
-            # 判断单双节点
-            if ALL_VMS[vmType]["isDual"]:
-                containerA = VectorCalc.add(containerA, VectorCalc.div2(vmSize))
-                containerB = VectorCalc.add(containerB, VectorCalc.div2(vmSize))
-                vmNodeInfo[vmId] = None
-            else:
-                # 将虚拟机放入负载较小的节点
-                if Auxiliary.calc_comp_res(containerA) <= Auxiliary.calc_comp_res(containerB):
-                    containerA = VectorCalc.add(containerA, vmSize)
-                    vmNodeInfo[vmId] = "A"
-                else:
-                    containerB = VectorCalc.add(containerB, vmSize)
-                    vmNodeInfo[vmId] = "B"
-        return containerA, containerB, vmNodeInfo
+        return cost[0] + ALPHA * days * cost[1]
 
     @staticmethod
     def sort_pms_by_percUtil(reverse=False):
@@ -274,27 +248,11 @@ class Auxiliary:
             pm[node] = VectorCalc.add(pm[node], vmSize)
 
 
-def handle_delete(reqs):
-    '''执行删除策略'''
-    cleanup_req = []
-    deleted_num = 0
-    for vmId in reqs:
-        # 判断需要删除的资源是否存在
-        if vmId in STOCK_VMS:
-            vm = STOCK_VMS[vmId]
-            Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
-            # 从存量虚拟机中删除
-            STOCK_VMS.pop(vmId)
-            deleted_num += 1
-        else:
-            cleanup_req.append(vmId)
-    return cleanup_req, deleted_num
-
-def handle_migration(deleted_num):
-    '''执行迁移策略，输出经过迁移的虚拟机id'''
-    constraint_num = min(MAX_MIGRATION, (len(STOCK_VMS) + deleted_num) // 200)
+def handle_migration(delReqs):
+    '''执行迁移策略。输出经过迁移的虚拟机id'''
+    constraint_num = min(MAX_MIGRATION, len(STOCK_VMS) // 200)
     migration_num = 0
-    migrated = []
+    migrated = set()
     # 将服务器按既定策略递增排序
     length = len(OWNED_PMS)
     pmIds_w_percUtil = Auxiliary.sort_pms_by_percUtil()
@@ -309,6 +267,9 @@ def handle_migration(deleted_num):
         # 遍历服务器i中的虚拟机资源
         for item in vmIds_w_compRes:
             vmId = item[0]
+            # 跳过将要被删除的资源
+            if vmId in delReqs:
+                continue
             vm = STOCK_VMS[vmId]
             # 遍历服务器n-1到i+1
             for j in range(n, i, -1):
@@ -319,7 +280,7 @@ def handle_migration(deleted_num):
                 if isAssigned:
                     # 从旧服务器中删除
                     Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
-                    migrated.append(vmId)
+                    migrated.add(vmId)
                     # 重新插入服务器j到[j+1:length-1]
                     item = (pmId, Auxiliary.calc_perc_util(OWNED_PMS[pmId]))
                     pmIds_w_percUtil = pmIds_w_percUtil[:j] + Auxiliary.insert_pmId_by_percUtil(item, pmIds_w_percUtil[j + 1:])
@@ -335,12 +296,12 @@ def handle_migration(deleted_num):
     return migrated, pmIds_w_percUtil
 
 def handle_placement(reqs, pmIds_w_percUtil):
-    '''执行放置策略，使用传进来的增序的服务器'''
+    '''执行放置策略，使用传进来的增序排列的服务器'''
     purchase_req = []
     length = len(OWNED_PMS)
     # 将请求按大小递增排序
     reqs_w_compRes = Auxiliary.sort_reqs_by_compRes(reqs)
-    # 遍历到达的服务器索引
+    # 记录到达的服务器索引
     n = length - 1
     # 遍历输入的增添请求
     for item in reqs_w_compRes:
@@ -366,12 +327,37 @@ def handle_placement(reqs, pmIds_w_percUtil):
 def handle_purchase(reqs, leftDays):
     '''执行购买，更新拥有服务器和存量虚拟机，返回购买信息'''
 
+    def calc_total_size(reqs):
+        '''计算输入虚拟机列表的总所需资源（均分入两个节点中）'''
+        containerA = [0, 0]
+        containerB = [0, 0]
+        vmNodeInfo = {}
+        # 遍历虚拟机
+        for req in reqs:
+            vmId = req[0]
+            vmType = req[1]
+            vmSize = ALL_VMS[vmType]["size"]
+            # 判断单双节点
+            if ALL_VMS[vmType]["isDual"]:
+                containerA = VectorCalc.add(containerA, VectorCalc.div2(vmSize))
+                containerB = VectorCalc.add(containerB, VectorCalc.div2(vmSize))
+                vmNodeInfo[vmId] = None
+            else:
+                # 将虚拟机放入负载较小的节点
+                if Auxiliary.calc_comp_res(containerA) <= Auxiliary.calc_comp_res(containerB):
+                    containerA = VectorCalc.add(containerA, vmSize)
+                    vmNodeInfo[vmId] = "A"
+                else:
+                    containerB = VectorCalc.add(containerB, vmSize)
+                    vmNodeInfo[vmId] = "B"
+        return containerA, containerB, vmNodeInfo
+
     def calc_requirement(reqs, leftDays, pmTypes):
         '''计算需要购买的服务器'''
         purchase_pms = []
         vmIds = [req[0] for req in reqs]
         # 计算总所需资源
-        totalA, totalB, vmNodeInfo = Auxiliary.calc_total_size(reqs)
+        totalA, totalB, vmNodeInfo = calc_total_size(reqs)
         # 遍历可选购服务器
         for pmType in pmTypes:
             #判断该服务器能否装下所有请求
@@ -417,14 +403,13 @@ def handle_purchase(reqs, leftDays):
     
     return [(t, type_num[t]) for t in types]
 
-def final_cleanup(reqs):
-    '''执行最后清理'''
+def handle_delete(reqs):
+    '''执行删除'''
     for vmId in reqs:
         vm = STOCK_VMS[vmId]
         Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
         # 从存量虚拟机中删除
         STOCK_VMS.pop(vmId)
-
 
 if __name__ == "__main__":
     # to read standard input # process # to write standard output # sys.stdout.flush()
@@ -442,10 +427,9 @@ if __name__ == "__main__":
         # read daily requests
         req = DataIO.read_requests_day()
         # daily operation
-        cleanup_req, deleted_num = handle_delete(req["del"])
         if DEBUG:
             timeStamp1 = time.time()
-        migrated_vmIds, pmIds_w_percUtil = handle_migration(deleted_num)
+        migrated_vmIds, pmIds_w_percUtil = handle_migration(req["del"])
         if DEBUG:
             timeStamp2 = time.time()
             migration_time += (timeStamp2 - timeStamp1)
@@ -457,7 +441,7 @@ if __name__ == "__main__":
         if DEBUG:
             timeStamp2 = time.time()
             purchasing_time += (timeStamp2 - timeStamp1)
-        final_cleanup(cleanup_req)
+        handle_delete(req["del"])
         # daily output
         DataIO.generate_output_day(purchased, migrated_vmIds, req["add"])
 
