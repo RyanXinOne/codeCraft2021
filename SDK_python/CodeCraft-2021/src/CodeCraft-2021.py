@@ -1,16 +1,17 @@
 import sys
 
-DEBUG = True
+DEBUG = False
 
 if DEBUG:
     import time
+    dataset_no = 2
     # redirect stdin/stdout
-    sys.stdin = open("training-data/training-2.txt", "r")
-    sys.stdout = open("output.txt", "w")
+    sys.stdin = open("training-data/training-"+str(dataset_no)+".txt", "r")
+    sys.stdout = open("output"+str(dataset_no)+".txt", "w")
 
 # settings
-MAX_MIGRATION = 30
-RELAX_SIZE = 10
+RELAX_SIZE = 8
+MAX_MIGRATION = 80
 
 class VectorCalc:
     @staticmethod
@@ -32,9 +33,8 @@ class VectorCalc:
 
 class DataIO:
     @staticmethod
-    def read_data():
-        ''' 读取数据，返回: pms, vms, requests, days '''
-
+    def read_configure():
+        ''' 读取配置数据，返回: pms, vms, days '''
         # 读取可采购的服务器类型
         pmsNum = int(sys.stdin.readline())
         pms = {}
@@ -50,27 +50,29 @@ class DataIO:
             s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
             vms[s[0]] = {"size": [int(s[1]), int(s[2])], "isDual": bool(int(s[3]))}
 
-        # 读取以天为单位的用户请求序列
+        # 读取请求天数
         days = int(sys.stdin.readline())
-        requests = []
-        for i in range(days):
-            reqsNum = int(sys.stdin.readline())
-            dailyReq = {}
-            dailyReq["add"] = []
-            dailyReq["del"] = []
-            for j in range(reqsNum):
-                s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
-                if s[0] == "add":
-                    dailyReq["add"].append((s[2], s[1]))
-                else:
-                    dailyReq["del"].append(s[1])
-            requests.append(dailyReq)
 
-        return pms, vms, requests, days
+        return pms, vms, days
+
+    @staticmethod
+    def read_requests_day():
+        '''读取一天的请求'''
+        reqsNum = int(sys.stdin.readline())
+        dailyReq = {}
+        dailyReq["add"] = []
+        dailyReq["del"] = []
+        for j in range(reqsNum):
+            s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
+            if s[0] == "add":
+                dailyReq["add"].append((s[2], s[1]))
+            else:
+                dailyReq["del"].append(s[1])
+        return dailyReq
 
     @staticmethod
     def write_output_day(purchased, migration, placement):
-        ''' 
+        ''' 输出到标准输出流
         输入参数: 一天的决策信息
             "purchased": [(服务器型号, 购买数量), ...]
             "migration": [(虚拟机ID, 目的服务器ID, 目的服务器节点(可选)), ...]
@@ -98,7 +100,7 @@ class DataIO:
             sys.stdout.write(")\n")
 
     @staticmethod
-    def generate_output(purchased, migrated_vmIds, add_reqs):
+    def generate_output_day(purchased, migrated_vmIds, add_reqs):
         '''生成需要的输出格式'''
         migration = []
         for vmId in migrated_vmIds:
@@ -127,9 +129,8 @@ class Auxiliary:
         return size[0] ** 2 + size[1] ** 2
 
     @staticmethod
-    def calc_perc_util(pmId):
+    def calc_perc_util(pm):
         '''计算某一台服务器的资源利用率'''
-        pm = OWNED_PMS[pmId]
         # 计算总资源综合值
         total_size = ALL_PMS[pm["pmType"]]["size"]
         total_comp_res = Auxiliary.calc_comp_res(total_size)
@@ -173,42 +174,58 @@ class Auxiliary:
         return containerA, containerB, vmNodeInfo
 
     @staticmethod
-    def sort_pms_by_percUtil(pmIds, reverse=False):
+    def sort_pms_by_percUtil(reverse=False):
         '''将输入服务器id按照资源利用率递增/减排序，输出排序后的服务器id列表'''
         # 对每台服务器计算资源利用率
-        pms = [(pmId, Auxiliary.calc_perc_util(pmId)) for pmId in pmIds]
+        pmIds_w_percUtil = [(pmId, Auxiliary.calc_perc_util(pm)) for pmId, pm in enumerate(OWNED_PMS)]
         # 按资源利用率排序
-        pms.sort(key=lambda x: x[1], reverse=reverse)
-        # 输出服务器ids
-        return [pm[0] for pm in pms]
+        pmIds_w_percUtil.sort(key=lambda x: x[1], reverse=reverse)
+        # 输出服务器id和对应percUtil
+        return pmIds_w_percUtil
 
     @staticmethod
-    def sort_pms_by_compCost(pmTypes, days, reverse=False):
+    def sort_pms_by_compCost(days, reverse=False):
         '''将输入服务器类型按照资源利用率递增/减排序，输出排序后的服务器类型列表'''
         # 对每台服务器计算综合开销
-        pms = [(pmType, Auxiliary.calc_comp_cost(pmType, days)) for pmType in pmTypes]
+        pmTypes_w_compCost = [(pmType, Auxiliary.calc_comp_cost(pmType, days)) for pmType in ALL_PMS]
         # 按综合开销排序
-        pms.sort(key=lambda x: x[1], reverse=reverse)
-        # 输出服务器ids
-        return [pm[0] for pm in pms]
+        pmTypes_w_compCost.sort(key=lambda x: x[1], reverse=reverse)
+        # 输出服务器类型列表
+        return [item[0] for item in pmTypes_w_compCost]
 
     @staticmethod
     def sort_vms_by_compRes(vmIds, reverse=False):
         '''按综合资源值排序虚拟机id'''
-        vms = [(vmId, Auxiliary.calc_comp_res(ALL_VMS[STOCK_VMS[vmId]["vmType"]]["size"])) for vmId in vmIds]
+        vmIds_w_compRes = [(vmId, Auxiliary.calc_comp_res(ALL_VMS[STOCK_VMS[vmId]["vmType"]]["size"])) for vmId in vmIds]
         # 按综合资源排序
-        vms.sort(key=lambda x: x[1], reverse=reverse)
+        vmIds_w_compRes.sort(key=lambda x: x[1], reverse=reverse)
         # 输出虚拟机ids
-        return [vm[0] for vm in vms]
+        return vmIds_w_compRes
 
     @staticmethod
     def sort_reqs_by_compRes(reqs, reverse=False):
         '''按综合资源值排序虚拟机请求'''
-        rs = [(req, Auxiliary.calc_comp_res(ALL_VMS[req[1]]["size"])) for req in reqs]
+        reqs_w_compRes = [(req, Auxiliary.calc_comp_res(ALL_VMS[req[1]]["size"])) for req in reqs]
         # 按综合资源排序
-        rs.sort(key=lambda x: x[1], reverse=reverse)
+        reqs_w_compRes.sort(key=lambda x: x[1], reverse=reverse)
         # 输出服务器ids
-        return [req[0] for req in rs]
+        return reqs_w_compRes
+
+    @staticmethod
+    def insert_pmId_by_percUtil(item, pmIds_w_percUtil):
+        '''根据资源利用率插入服务器id，原列表需为递增序列'''
+        length = len(pmIds_w_percUtil)
+        if length == 0:
+            return [item]
+        median = length // 2
+
+        if item[1] == pmIds_w_percUtil[median][1]:
+            pmIds_w_percUtil.insert(median, item)
+            return pmIds_w_percUtil
+        elif item[1] < pmIds_w_percUtil[median][1]:
+            return Auxiliary.insert_pmId_by_percUtil(item, pmIds_w_percUtil[:median]) + pmIds_w_percUtil[median:]
+        else:
+            return pmIds_w_percUtil[:median + 1] + Auxiliary.insert_pmId_by_percUtil(item, pmIds_w_percUtil[median + 1:])
 
     @staticmethod
     def try_assign_vm(vmId, vmType, pmId):
@@ -260,6 +277,7 @@ class Auxiliary:
 def handle_delete(reqs):
     '''执行删除策略'''
     cleanup_req = []
+    deleted_num = 0
     for vmId in reqs:
         # 判断需要删除的资源是否存在
         if vmId in STOCK_VMS:
@@ -267,115 +285,119 @@ def handle_delete(reqs):
             Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
             # 从存量虚拟机中删除
             STOCK_VMS.pop(vmId)
+            deleted_num += 1
         else:
             cleanup_req.append(vmId)
-    return cleanup_req
+    return cleanup_req, deleted_num
 
-def handle_migration():
+def handle_migration(deleted_num):
     '''执行迁移策略，输出经过迁移的虚拟机id'''
-    constraint_num = min(MAX_MIGRATION, len(STOCK_VMS) // 200)
+    constraint_num = min(MAX_MIGRATION, (len(STOCK_VMS) + deleted_num) // 200)
     migration_num = 0
     migrated = []
     # 将服务器按既定策略递增排序
     length = len(OWNED_PMS)
-    pmIds = list(range(length))
-    pmIds = Auxiliary.sort_pms_by_percUtil(pmIds)
+    pmIds_w_percUtil = Auxiliary.sort_pms_by_percUtil()
+    # 检查约束限制
+    if constraint_num == 0:
+        return migrated, pmIds_w_percUtil
     # 遍历服务器0到n-1
     for i in range(length):
-        pmId = pmIds[i]
         # 升序排序服务器i中的虚拟机资源
-        vmIds = Auxiliary.sort_vms_by_compRes(OWNED_PMS[pmId]["vms"])
+        vmIds_w_compRes = Auxiliary.sort_vms_by_compRes(OWNED_PMS[pmIds_w_percUtil[i][0]]["vms"])
         n = length - 1
         # 遍历服务器i中的虚拟机资源
-        for vmId in vmIds:
+        for item in vmIds_w_compRes:
+            vmId = item[0]
             vm = STOCK_VMS[vmId]
             # 遍历服务器n-1到i+1
             for j in range(n, i, -1):
+                pmId = pmIds_w_percUtil[j][0]
                 # 尝试迁移到新服务器
-                isAssigned = Auxiliary.try_assign_vm(vmId, vm["vmType"], pmIds[j])
+                isAssigned = Auxiliary.try_assign_vm(vmId, vm["vmType"], pmId)
                 # 若迁移成功
                 if isAssigned:
                     # 从旧服务器中删除
                     Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
                     migrated.append(vmId)
-                    migration_num += 1
+                    # 重新插入服务器j到[j+1:length-1]
+                    item = (pmId, Auxiliary.calc_perc_util(OWNED_PMS[pmId]))
+                    pmIds_w_percUtil = pmIds_w_percUtil[:j] + Auxiliary.insert_pmId_by_percUtil(item, pmIds_w_percUtil[j + 1:])
                     # 检查是否达到约束限制
+                    migration_num += 1
                     if migration_num == constraint_num:
-                        return migrated
-                    # 重新排序服务器j到n-1
-                    pmIds = pmIds[:j] + Auxiliary.sort_pms_by_percUtil(pmIds[j:])
+                        return migrated, pmIds_w_percUtil
                     n = min(j + RELAX_SIZE, length - 1)
                     break
             else:
                 # 优化：若无法迁移，则不能使该服务器达到空闲，不再尝试继续迁移
                 break
-    return migrated
+    return migrated, pmIds_w_percUtil
 
-def handle_place(reqs):
-    '''执行放置策略'''
+def handle_placement(reqs, pmIds_w_percUtil):
+    '''执行放置策略，使用传进来的增序的服务器'''
     purchase_req = []
-    pmIds = list(range(len(OWNED_PMS)))
-    # 将服务器按既定策略递减排序
-    pmIds = Auxiliary.sort_pms_by_percUtil(pmIds, reverse=True)
+    length = len(OWNED_PMS)
     # 将请求按大小递增排序
-    reqs = Auxiliary.sort_reqs_by_compRes(reqs)
+    reqs_w_compRes = Auxiliary.sort_reqs_by_compRes(reqs)
     # 遍历到达的服务器索引
-    n = 0
-    length = len(pmIds)
+    n = length - 1
     # 遍历输入的增添请求
-    for vmId, vmType in reqs:
-        # 遍历服务器
-        for j in range(n, length):
-            pmId = pmIds[j]
+    for item in reqs_w_compRes:
+        vmId, vmType = item[0]
+        # 倒序遍历服务器
+        for j in range(n, -1, -1):
+            pmId = pmIds_w_percUtil[j][0]
             # 尝试放置请求
             isAssigned = Auxiliary.try_assign_vm(vmId, vmType, pmId)
             # 若放置成功
             if isAssigned:
-                # 重新排序服务器0到i
-                pmIds = Auxiliary.sort_pms_by_percUtil(pmIds[: j + 1], reverse=True) + pmIds[j + 1 :]
-                n = max(j - RELAX_SIZE, 0)
+                # 重新插入服务器j到[j+1:length-1]
+                item = (pmId, Auxiliary.calc_perc_util(OWNED_PMS[pmId]))
+                pmIds_w_percUtil = pmIds_w_percUtil[:j] + Auxiliary.insert_pmId_by_percUtil(item, pmIds_w_percUtil[j + 1:])
+                n = min(j + RELAX_SIZE, length - 1)
                 break
         else:
             # 记录放不下的请求
             purchase_req.append((vmId, vmType))
-            n = max(length - RELAX_SIZE, 0)
+            n = min(RELAX_SIZE, length - 1)
     return purchase_req
 
-def pre_purchase(reqs, leftDays, pmTypes):
-    '''计算需要购买的服务器'''
-    purchase_pms = []
-    vmIds = [req[0] for req in reqs]
-    # 计算总所需资源
-    totalA, totalB, vmNodeInfo = Auxiliary.calc_total_size(reqs)
-    # 遍历可选购服务器
-    for pmType in pmTypes:
-        #判断该服务器能否装下所有请求
-        nodeSize = VectorCalc.div2(ALL_PMS[pmType]["size"])
-        if VectorCalc.ge(nodeSize, totalA) and VectorCalc.ge(nodeSize, totalB):
-            # 购买该服务器并分配所有请求
-            purchase_pms.append({"pmType": pmType, "vms": set(vmIds), "A": VectorCalc.minus(nodeSize, totalA), "B": VectorCalc.minus(nodeSize, totalB)})
-            break
-    else:
-        # 二分请求，递归购买
-        n = len(reqs)
-        vmNodeInfo = {}
-        tmp_pms, tmp_vms = pre_purchase(reqs[: n // 2], leftDays, pmTypes)
-        purchase_pms += tmp_pms
-        vmNodeInfo.update(tmp_vms)
-        tmp_pms, tmp_vms = pre_purchase(reqs[n // 2 :], leftDays, pmTypes)
-        purchase_pms += tmp_pms
-        vmNodeInfo.update(tmp_vms)
-
-    return purchase_pms, vmNodeInfo
-    
 def handle_purchase(reqs, leftDays):
     '''执行购买，更新拥有服务器和存量虚拟机，返回购买信息'''
+
+    def calc_requirement(reqs, leftDays, pmTypes):
+        '''计算需要购买的服务器'''
+        purchase_pms = []
+        vmIds = [req[0] for req in reqs]
+        # 计算总所需资源
+        totalA, totalB, vmNodeInfo = Auxiliary.calc_total_size(reqs)
+        # 遍历可选购服务器
+        for pmType in pmTypes:
+            #判断该服务器能否装下所有请求
+            nodeSize = VectorCalc.div2(ALL_PMS[pmType]["size"])
+            if VectorCalc.ge(nodeSize, totalA) and VectorCalc.ge(nodeSize, totalB):
+                # 购买该服务器并分配所有请求
+                purchase_pms.append({"pmType": pmType, "vms": set(vmIds), "A": VectorCalc.minus(nodeSize, totalA), "B": VectorCalc.minus(nodeSize, totalB)})
+                break
+        else:
+            # 二分请求，递归购买
+            n = len(reqs)
+            vmNodeInfo = {}
+            tmp_pms, tmp_vms = calc_requirement(reqs[: n // 2], leftDays, pmTypes)
+            purchase_pms += tmp_pms
+            vmNodeInfo.update(tmp_vms)
+            tmp_pms, tmp_vms = calc_requirement(reqs[n // 2 :], leftDays, pmTypes)
+            purchase_pms += tmp_pms
+            vmNodeInfo.update(tmp_vms)
+
+        return purchase_pms, vmNodeInfo
+
     vmTypeInfo = dict(reqs)
     # 将可选购服务器按综合开销递增排序
-    pmTypes = [pmType for pmType in ALL_PMS]
-    pmTypes = Auxiliary.sort_pms_by_compCost(pmTypes, leftDays)
+    pmTypes = Auxiliary.sort_pms_by_compCost(leftDays)
     # 计算购买需求
-    purchase_pms, vmNodeInfo = pre_purchase(reqs, leftDays, pmTypes)
+    purchase_pms, vmNodeInfo = calc_requirement(reqs, leftDays, pmTypes)
     # 将需要购买的服务器按照类型排序
     purchase_pms.sort(key=lambda x: x["pmType"])
     # 保存购买的服务器类型和数量
@@ -395,7 +417,6 @@ def handle_purchase(reqs, leftDays):
     
     return [(t, type_num[t]) for t in types]
 
-
 def final_cleanup(reqs):
     '''执行最后清理'''
     for vmId in reqs:
@@ -409,26 +430,42 @@ if __name__ == "__main__":
     # to read standard input # process # to write standard output # sys.stdout.flush()
     if DEBUG:
         start_time = time.time()
+        migration_time = placement_time = purchasing_time = 0
     
-    ALL_PMS, ALL_VMS, REQS, all_days = DataIO.read_data()
-
+    ALL_PMS, ALL_VMS, days = DataIO.read_configure()
     OWNED_PMS = []
     STOCK_VMS = {}
 
-    for d, req in enumerate(REQS):
-        sys.stderr.write(str(d) + "\n")
+    for d in range(days):
+        if DEBUG:
+            sys.stderr.write(str(d + 1) + "/" + str(days) + "\n")
+        # read daily requests
+        req = DataIO.read_requests_day()
         # daily operation
-        cleanup_req = handle_delete(req["del"])
-        migrated_vmIds = handle_migration()
-        purchase_req = handle_place(req["add"])
-        purchased = handle_purchase(purchase_req, all_days - d)
+        cleanup_req, deleted_num = handle_delete(req["del"])
+        if DEBUG:
+            timeStamp1 = time.time()
+        migrated_vmIds, pmIds_w_percUtil = handle_migration(deleted_num)
+        if DEBUG:
+            timeStamp2 = time.time()
+            migration_time += (timeStamp2 - timeStamp1)
+        purchase_req = handle_placement(req["add"], pmIds_w_percUtil)
+        if DEBUG:
+            timeStamp1 = time.time()
+            placement_time += (timeStamp1 - timeStamp2)
+        purchased = handle_purchase(purchase_req, days - d)
+        if DEBUG:
+            timeStamp2 = time.time()
+            purchasing_time += (timeStamp2 - timeStamp1)
         final_cleanup(cleanup_req)
-
         # daily output
-        DataIO.generate_output(purchased, migrated_vmIds, req["add"])
+        DataIO.generate_output_day(purchased, migrated_vmIds, req["add"])
 
     sys.stdout.flush()
 
     if DEBUG:
         end_time = time.time()
-        sys.stderr.write("time cost: " + str(end_time - start_time) + "\n")
+        sys.stderr.write("total time cost: " + str(end_time - start_time) + "\n")
+        sys.stderr.write("migration time: " + str(migration_time) + "\n")
+        sys.stderr.write("placement time: " + str(placement_time) + "\n")
+        sys.stderr.write("purchasing time: " + str(purchasing_time) + "\n")
