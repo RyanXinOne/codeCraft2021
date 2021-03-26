@@ -1,6 +1,6 @@
 import sys
 
-DEBUG = False
+DEBUG = True
 
 if DEBUG:
     import time
@@ -10,10 +10,11 @@ if DEBUG:
     sys.stdout = open("output"+str(dataset_no)+".txt", "w")
 
 # settings
-MAX_MIGRATION = 40
-MIGRATION_GAP = 20
-MIGRATION_RELAX_SIZE = 1
-PLACEMENT_RELAX_SIZE = 30
+MAX_MIGRATION = 200
+MAX_FAIL_MIGRATION = 25
+MIGRATION_GAP = 10
+MIGRATION_RELAX_SIZE = 2
+PLACEMENT_RELAX_SIZE = 300
 ALPHA = 0.8
 
 
@@ -282,6 +283,7 @@ def handle_migration(delReqs):
     '''执行迁移策略。输出经过迁移的虚拟机id'''
     constraint_num = min(MAX_MIGRATION, len(STOCK_VMS) // 200)
     migration_num = 0
+    fail_migration_num = 0
     migrated = set()
     # 将服务器按既定策略递增排序
     length = len(OWNED_PMS)
@@ -319,6 +321,9 @@ def handle_migration(delReqs):
                     break
             else:
                 # 优化：若无法迁移，则不能使该服务器达到空闲，不再尝试继续迁移
+                fail_migration_num += 1
+                if fail_migration_num == MAX_FAIL_MIGRATION:
+                    return migrated
                 break
     return migrated
 
