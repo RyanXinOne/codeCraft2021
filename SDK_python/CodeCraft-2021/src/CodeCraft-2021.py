@@ -14,8 +14,8 @@ MAX_MIGRATION = 200
 MAX_FAIL_MIGRATION = 25
 MIGRATION_GAP = 10
 MIGRATION_RELAX_SIZE = 2
-PLACEMENT_RELAX_SIZE = 300
-ALPHA = 0.8
+# PLACEMENT_RELAX_SIZE = 300
+ALPHA = 0.95
 
 
 class VectorCalc:
@@ -64,13 +64,16 @@ class DataIO:
         '''读取一天的请求'''
         reqsNum = int(sys.stdin.readline())
         dailyReq = {}
+        dailyReq["all"] = []
         dailyReq["add"] = []
         dailyReq["del"] = set()
         for j in range(reqsNum):
             s = sys.stdin.readline().strip().lstrip("(").rstrip(")").replace(" ", "").split(",")
             if s[0] == "add":
+                dailyReq["all"].append((s[2], s[1]))
                 dailyReq["add"].append((s[2], s[1]))
             else:
+                dailyReq["all"].append((s[1], ))
                 dailyReq["del"].add(s[1])
         return dailyReq
 
@@ -312,11 +315,12 @@ def handle_migration(delReqs):
                 if isAssigned:
                     # 从旧服务器中删除
                     Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
-                    migrated.add(vmId)
-                    # 检查是否达到约束限制
-                    migration_num += 1
-                    if migration_num == constraint_num:
-                        return migrated
+                    if vmId not in migrated:
+                        migrated.add(vmId)
+                        # 检查是否达到约束限制
+                        migration_num += 1
+                        if migration_num == constraint_num:
+                            return migrated
                     n = min(j + MIGRATION_RELAX_SIZE, length - 1)
                     break
             else:
@@ -328,31 +332,35 @@ def handle_migration(delReqs):
     return migrated
 
 def handle_placement(reqs):
-    '''执行放置策略'''
+    '''执行放置策略，包含添加和删除请求的处理'''
     purchase_req = []
     length = len(OWNED_PMS)
-    # 将请求按大小递增排序
-    reqs_w_compRes = Auxiliary.sort_reqs_by_compRes(reqs)
     # 将服务器递增排序
     pmIds_w_measure = Auxiliary.sort_pms_by_serverLoad()
-    # 记录到达的服务器索引
-    n = length - 1
-    # 遍历输入的增添请求
-    for item in reqs_w_compRes:
-        vmId, vmType = item[0]
+    # 遍历输入的请求
+    for req in reqs:
+        # 判断是否为删除请求
+        if len(req) == 1:
+            vmId = req[0]
+            vm = STOCK_VMS[vmId]
+            Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
+            # 从存量虚拟机中删除
+            STOCK_VMS.pop(vmId)
+            continue
+
+        # 对于增添请求
+        vmId, vmType = req
         # 倒序遍历服务器
-        for j in range(n, -1, -1):
+        for j in range(length - 1, -1, -1):
             pmId = pmIds_w_measure[j][0]
             # 尝试放置请求
             isAssigned = Auxiliary.try_assign_vm(vmId, vmType, pmId)
             # 若放置成功
             if isAssigned:
-                n = min(j + PLACEMENT_RELAX_SIZE, length - 1)
                 break
         else:
             # 记录放不下的请求
             purchase_req.append((vmId, vmType))
-            n = min(PLACEMENT_RELAX_SIZE, length - 1)
     return purchase_req
 
 def handle_purchase(reqs, leftDays):
@@ -434,13 +442,6 @@ def handle_purchase(reqs, leftDays):
     
     return [(t, type_num[t]) for t in types]
 
-def handle_delete(reqs):
-    '''执行删除'''
-    for vmId in reqs:
-        vm = STOCK_VMS[vmId]
-        Auxiliary.delete_vm(vmId, vm["vmType"], vm["pmId"], vm["node"])
-        # 从存量虚拟机中删除
-        STOCK_VMS.pop(vmId)
 
 if __name__ == "__main__":
     # to read standard input # process # to write standard output # sys.stdout.flush()
@@ -448,7 +449,7 @@ if __name__ == "__main__":
         start_time = time.time()
         migration_time = placement_time = purchasing_time = 0
         total_cost = 0
-    
+
     ALL_PMS, ALL_VMS, days = DataIO.read_configure()
     OWNED_PMS = []
     STOCK_VMS = {}
@@ -465,7 +466,7 @@ if __name__ == "__main__":
         if DEBUG:
             timeStamp2 = time.time()
             migration_time += (timeStamp2 - timeStamp1)
-        purchase_req = handle_placement(req["add"])
+        purchase_req = handle_placement(req["all"])
         if DEBUG:
             timeStamp1 = time.time()
             placement_time += (timeStamp1 - timeStamp2)
@@ -473,7 +474,7 @@ if __name__ == "__main__":
         if DEBUG:
             timeStamp2 = time.time()
             purchasing_time += (timeStamp2 - timeStamp1)
-        handle_delete(req["del"])
+        # handle_delete(req["del"])
         # daily output
         DataIO.generate_output_day(purchased, migrated_vmIds, req["add"])
         if DEBUG:
