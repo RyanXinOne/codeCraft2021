@@ -1,19 +1,21 @@
 import sys
 
-DEBUG = True
+DEBUG = False
 
 if DEBUG:
     import time
-    dataset_no = 2
+    dataset_no = 1
     # redirect stdin/stdout
     sys.stdin = open("training-data/training-"+str(dataset_no)+".txt", "r")
     sys.stdout = open("output"+str(dataset_no)+".txt", "w")
 
 # settings
-MAX_MIGRATION = 200
-MAX_FAIL_MIGRATION = 25
-MIGRATION_GAP = 10
-MIGRATION_RELAX_SIZE = 2
+MAX_MIGRATION = 30
+# MAX_FAIL_MIGRATION = 5
+MIGRATION_PART = 10
+MAX_MIGRATED_PER_PM = 4
+MIGRATION_GAP = 0
+# MIGRATION_RELAX_SIZE = 10
 # PLACEMENT_RELAX_SIZE = 300
 ALPHA = 0.95
 
@@ -34,6 +36,11 @@ class VectorCalc:
     @staticmethod
     def ge(a, b):
         return a[0] >= b[0] and a[1] >= b[1]
+
+    @staticmethod
+    def var(a):
+        mean = (a[0] + a[1]) / 2
+        return (a[0] - mean) ** 2 + (a[1] - mean) ** 2
 
 
 class DataIO:
@@ -202,6 +209,12 @@ class Auxiliary:
         return [item[0] for item in pmTypes_w_compCost]
 
     @staticmethod
+    def sort_pms_by_variance(reverse=False):
+        pmIds_w_var = [(pmId, VectorCalc.var(VectorCalc.add(pm["A"], pm["B"]))) for pmId, pm in enumerate(OWNED_PMS)]
+        pmIds_w_var.sort(key=lambda x: x[1], reverse=reverse)
+        return pmIds_w_var
+
+    @staticmethod
     def sort_vms_by_compRes(vmIds, reverse=False):
         '''按综合资源值排序虚拟机id'''
         vmIds_w_compRes = [(vmId, Auxiliary.calc_comp_res(ALL_VMS[STOCK_VMS[vmId]["vmType"]]["size"])) for vmId in vmIds]
@@ -209,6 +222,12 @@ class Auxiliary:
         vmIds_w_compRes.sort(key=lambda x: x[1], reverse=reverse)
         # 输出虚拟机ids
         return vmIds_w_compRes
+
+    @staticmethod
+    def sort_vms_by_variance(vmIds, reverse=False):
+        vmIds_w_var = [(vmId, VectorCalc.var(ALL_VMS[STOCK_VMS[vmId]["vmType"]]["size"])) for vmId in vmIds]
+        vmIds_w_var.sort(key=lambda x: x[1], reverse=reverse)
+        return vmIds_w_var
 
     @staticmethod
     def sort_reqs_by_compRes(reqs, reverse=False):
@@ -239,6 +258,7 @@ class Auxiliary:
     def try_assign_vm(vmId, vmType, pmId):
         '''尝试将一个虚拟机放入一个服务器，返回该操作是否成功的布尔值'''
         pm = OWNED_PMS[pmId]
+        pmSize = ALL_PMS[pm["pmType"]]["size"]
         vmSize = ALL_VMS[vmType]["size"]
         # 若vm为双节点
         if ALL_VMS[vmType]["isDual"]:
@@ -253,19 +273,27 @@ class Auxiliary:
                 return False
         # 若vm为单节点
         else:
-            # 选取资源综合值较低的节点
-            nodeSize = VectorCalc.div2(ALL_PMS[pm["pmType"]]["size"])
+            # 选取放入后负载较低的节点
+            nodeSize = VectorCalc.div2(pmSize)
             sizeA = VectorCalc.minus(nodeSize, pm["A"])
             sizeB = VectorCalc.minus(nodeSize, pm["B"])
-            node = "A" if Auxiliary.calc_comp_res(sizeA) <= Auxiliary.calc_comp_res(sizeB) else 'B'
+            node = "A" if Auxiliary.calc_comp_res(sizeA) <= Auxiliary.calc_comp_res(sizeB) else "B"
             if VectorCalc.ge(pm[node], vmSize):
                 # 允许放入
                 STOCK_VMS[vmId] = {"vmType": vmType, "pmId": pmId, "node": node}
                 pm["vms"].add(vmId)
                 pm[node] = VectorCalc.minus(pm[node], vmSize)
                 return True
-            else:
-                return False
+            
+            oppo_node = "B" if node == "A" else "A"
+            if VectorCalc.ge(pm[oppo_node], vmSize):
+                # 允许放入
+                STOCK_VMS[vmId] = {"vmType": vmType, "pmId": pmId, "node": oppo_node}
+                pm["vms"].add(vmId)
+                pm[oppo_node] = VectorCalc.minus(pm[oppo_node], vmSize)
+                return True
+
+            return False
 
     @staticmethod
     def delete_vm(vmId, vmType, pmId, node):
@@ -286,19 +314,20 @@ def handle_migration(delReqs):
     '''执行迁移策略。输出经过迁移的虚拟机id'''
     constraint_num = min(MAX_MIGRATION, len(STOCK_VMS) // 200)
     migration_num = 0
-    fail_migration_num = 0
+    # fail_migration_num = 0
     migrated = set()
     # 将服务器按既定策略递增排序
-    length = len(OWNED_PMS)
-    pmIds_w_measure = Auxiliary.sort_pms_by_serverLoad()
+    length = len(OWNED_PMS) // MIGRATION_PART
+    pmIds_w_measure = Auxiliary.sort_pms_by_variance(reverse=True)[:length]
     # 检查约束限制
     if constraint_num == 0:
         return migrated
     # 遍历服务器0到n-1
     for i in range(length):
         # 升序排序服务器i中的虚拟机资源
-        vmIds_w_compRes = Auxiliary.sort_vms_by_compRes(OWNED_PMS[pmIds_w_measure[i][0]]["vms"])
-        n = length - 1
+        vmIds_w_compRes = Auxiliary.sort_vms_by_variance(OWNED_PMS[pmIds_w_measure[i][0]]["vms"], reverse=True)
+        migrated_per_pm = 0
+        bb = False
         # 遍历服务器i中的虚拟机资源
         for item in vmIds_w_compRes:
             vmId = item[0]
@@ -307,7 +336,7 @@ def handle_migration(delReqs):
                 continue
             vm = STOCK_VMS[vmId]
             # 遍历服务器n-1到i+1
-            for j in range(n, i + MIGRATION_GAP, -1):
+            for j in range(length-1, i + MIGRATION_GAP, -1):
                 pmId = pmIds_w_measure[j][0]
                 # 尝试迁移到新服务器
                 isAssigned = Auxiliary.try_assign_vm(vmId, vm["vmType"], pmId)
@@ -321,13 +350,12 @@ def handle_migration(delReqs):
                         migration_num += 1
                         if migration_num == constraint_num:
                             return migrated
-                    n = min(j + MIGRATION_RELAX_SIZE, length - 1)
+                        
+                        migrated_per_pm += 1
+                        if migrated_per_pm == MAX_MIGRATED_PER_PM:
+                            bb = True
                     break
-            else:
-                # 优化：若无法迁移，则不能使该服务器达到空闲，不再尝试继续迁移
-                fail_migration_num += 1
-                if fail_migration_num == MAX_FAIL_MIGRATION:
-                    return migrated
+            if bb:
                 break
     return migrated
 
@@ -382,8 +410,8 @@ def handle_purchase(reqs, leftDays):
                 containerB = VectorCalc.add(containerB, VectorCalc.div2(vmSize))
                 vmNodeInfo[vmId] = None
             else:
-                # 将虚拟机放入负载较小的节点
-                if Auxiliary.calc_comp_res(containerA) <= Auxiliary.calc_comp_res(containerB):
+                # 将虚拟机放入加入后负载较小的节点
+                if Auxiliary.calc_comp_res(VectorCalc.add(containerA, vmSize)) <= Auxiliary.calc_comp_res(VectorCalc.add(containerB, vmSize)):
                     containerA = VectorCalc.add(containerA, vmSize)
                     vmNodeInfo[vmId] = "A"
                 else:
@@ -463,6 +491,7 @@ if __name__ == "__main__":
         if DEBUG:
             timeStamp1 = time.time()
         migrated_vmIds = handle_migration(req["del"])
+        #migrated_vmIds = set()
         if DEBUG:
             timeStamp2 = time.time()
             migration_time += (timeStamp2 - timeStamp1)
@@ -474,7 +503,6 @@ if __name__ == "__main__":
         if DEBUG:
             timeStamp2 = time.time()
             purchasing_time += (timeStamp2 - timeStamp1)
-        # handle_delete(req["del"])
         # daily output
         DataIO.generate_output_day(purchased, migrated_vmIds, req["add"])
         if DEBUG:
@@ -485,6 +513,9 @@ if __name__ == "__main__":
             for pm in OWNED_PMS:
                 if pm["vms"]:
                     total_cost += ALL_PMS[pm["pmType"]]["cost"][1]
+
+        # sys.stderr.write(str(OWNED_PMS) + "\n")
+        # time.sleep(1)
 
     sys.stdout.flush()
 
